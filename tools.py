@@ -316,22 +316,54 @@ def compare_price(new_item: dict) -> dict:
 
 # ── Stretch Tool: get_trending_styles ─────────────────────────────────────────
 
+def _rank_by_google_trends(candidate_tags: list[str]) -> list[str] | None:
+    """
+    Re-rank candidate_tags by 7-day Google Trends interest (Apparel cat=185, US).
+    Returns None if the request fails or returns no data, so callers can fall back.
+    """
+    try:
+        from pytrends.request import TrendReq
+
+        pytrends = TrendReq(hl="en-US", tz=360)
+        pytrends.build_payload(
+            kw_list=candidate_tags,
+            cat=185,        # Google Trends: Shopping > Apparel & Accessories
+            timeframe="now 7-d",
+            geo="US",
+        )
+        data = pytrends.interest_over_time()
+        if data.empty:
+            return None
+        cols = [c for c in candidate_tags if c in data.columns]
+        if not cols:
+            return None
+        scores = data[cols].mean().sort_values(ascending=False)
+        return list(scores.index)
+    except Exception:
+        return None
+
+
 def get_trending_styles(category: str | None = None) -> dict:
     """
-    Identify trending style tags by analyzing tag frequency across the dataset.
-    Tags appearing in more listings are treated as more in-demand.
+    Identify trending style tags for a category using a two-step approach:
 
-    Data source: data/listings.json — tag frequency within the dataset is used
-    as a supply-side proxy for what styles are currently circulating most.
+    Step 1 — local candidate pool: the top-5 style tags by listing count in
+    data/listings.json for the given category are used as query keywords.
+
+    Step 2 — Google Trends re-rank: those tags are sent to the Google Trends
+    API (Apparel & Accessories category, past 7 days, US) and re-ordered by
+    actual search interest. Falls back to local frequency order if the request
+    fails or returns no data.
 
     Args:
         category: Limit trend analysis to one category, or None for all categories.
 
     Returns:
         A dict with:
-            trending_styles (list[str]): top 5 style tags by listing count
+            trending_styles (list[str]): top 5 tags ranked by Google Trends
+                                         interest (or local frequency on fallback)
             hot_category (str): most-listed category across the full dataset
-            data_source (str): description of what was analyzed
+            data_source (str): what was analyzed and which source ranked the tags
     """
     all_listings = load_listings()
     scoped = (
@@ -345,7 +377,7 @@ def get_trending_styles(category: str | None = None) -> dict:
             tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
     sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
-    trending = [tag for tag, _ in sorted_tags[:5]]
+    candidate_tags = [tag for tag, _ in sorted_tags[:5]]
 
     cat_counts: dict[str, int] = {}
     for listing in all_listings:
@@ -354,8 +386,23 @@ def get_trending_styles(category: str | None = None) -> dict:
     hot_category = max(cat_counts, key=cat_counts.get)
 
     scope_label = f"{category} listings" if category else "all listings"
+
+    google_ranked = _rank_by_google_trends(candidate_tags)
+    if google_ranked:
+        trending = google_ranked
+        data_source = (
+            f"Google Trends (past week, Apparel & Accessories) re-ranked from "
+            f"{len(scoped)} {scope_label} in data/listings.json"
+        )
+    else:
+        trending = candidate_tags
+        data_source = (
+            f"Analyzed {len(scoped)} {scope_label} from data/listings.json "
+            f"(Google Trends unavailable — using local frequency)"
+        )
+
     return {
         "trending_styles": trending,
         "hot_category": hot_category,
-        "data_source": f"Analyzed {len(scoped)} {scope_label} from data/listings.json",
+        "data_source": data_source,
     }

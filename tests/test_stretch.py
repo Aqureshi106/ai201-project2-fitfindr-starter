@@ -206,10 +206,12 @@ def test_get_trending_styles_scoped_by_category():
 def test_get_trending_styles_all_categories_broader_than_scoped():
     all_result = get_trending_styles(category=None)
     tops_result = get_trending_styles(category="tops")
-    # All-category analysis covers more listings — data_source count should be higher
-    all_count = int("".join(c for c in all_result["data_source"] if c.isdigit()) or "0")
-    tops_count = int("".join(c for c in tops_result["data_source"] if c.isdigit()) or "0")
-    assert all_count >= tops_count
+    # All-category analysis covers more (or equal) listings than a single category
+    import re as _re
+    def _first_int(s):
+        m = _re.search(r'\d+', s)
+        return int(m.group()) if m else 0
+    assert _first_int(all_result["data_source"]) >= _first_int(tops_result["data_source"])
 
 
 # ── suggest_outfit with trend_tags and style_profile ─────────────────────────

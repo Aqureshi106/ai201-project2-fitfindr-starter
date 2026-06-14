@@ -15,7 +15,9 @@
     "feminine",
     "floral",
     "western",
-    "earth tones"
+    "earth tones",
+    "goth",
+    "layering"
   ],
   "past_categories": [
     "tops",
@@ -24,8 +26,8 @@
     "shoes"
   ],
   "price_range": {
-    "min": 18.0,
+    "min": 15.0,
     "max": 45.0
   },
-  "interaction_count": 12
+  "interaction_count": 22
 }
