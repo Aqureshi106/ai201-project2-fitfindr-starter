@@ -193,6 +193,84 @@ assert result is not None           # no exception raised — passes
 
 ---
 
+## Stretch Features
+
+### Price Comparison Tool — `compare_price(new_item)`
+
+**Purpose:** 
+Benchmarks the selected item's price against comparable listings in the dataset. Called automatically in `run_agent()` after `search_listings` selects an item. Result is displayed in the "Price Analysis" panel.
+
+**How comparisons are made:** 
+A comparable listing is defined as any listing that (1) shares the same `category` as the selected item and (2) has at least one overlapping `style_tag`. The average price of all comparables is computed, and the selected item's price is expressed as a percentage above or below that average. Verdicts: `great deal` (≤ −20%), `fair price` (≤ +5%), `slightly high` (≤ +25%), `overpriced` (> +25%).
+
+**Inputs:** `new_item (dict)` — a listing dict from `search_listings`
+**Output:** `dict` with `comparable_count (int)`, `avg_comparable_price (float|None)`, `price_diff_pct (float|None)`, `verdict (str)`, `assessment (str)`
+
+**Example output from testing:**
+```
+Verdict: FAIR PRICE
+At $18.00, this is priced close to the average $22.00 across 14 comparable tops listing(s). Fair value.
+Comparables found: 14 listing(s)
+Average comparable price: $22.00
+This item vs. average: -18.2%
+```
+
+---
+
+### Style Profile Memory
+
+**Storage approach:** 
+After each successful interaction, `save_style_profile(session)` extracts the selected item's `style_tags` and `category` and appends them to `style_profile.json` in the project root. At the start of each new `run_agent()` call, `load_style_profile()` reads this file. If the user's wardrobe is empty but the profile contains accumulated `preferred_styles`, `suggest_outfit` is called with `style_profile=profile` instead of a generic fallback — the LLM prompt says "Based on their style history, they gravitate toward: [tags]" rather than offering general advice.
+
+**Two-interaction demo (from `agent.py` CLI):**
+- Interaction 1: `"vintage graphic tee under $30"` with example wardrobe → profile saves `["y2k", "vintage", "graphic tee", "cottagecore"]`
+- Interaction 2: `"streetwear hoodie under $50"` with empty wardrobe → `session["profile_used"] = True`, outfit suggestion references saved style history
+
+---
+
+### Trend Awareness Tool — `get_trending_styles(category)`
+
+**Purpose:** 
+Identifies trending style tags for a given category and injects them into the `suggest_outfit` prompt so the LLM can reference current trends in its outfit suggestion. Trend tags are also displayed in the "Style Context" panel.
+
+**Data source:** 
+`data/listings.json` — style_tag frequency within the mock dataset is used as a supply-side proxy for trending styles. Tags appearing in more listings are treated as more circulating/in-demand. The analysis is scoped to the selected item's category (e.g. only `tops` listings for a tee) to keep trends relevant.
+
+**Inputs:** `category (str|None)` — category to scope the analysis, or None for all
+**Output:** `dict` with `trending_styles (list[str])`, `hot_category (str)`, `data_source (str)`
+
+**Example output from testing:**
+```
+Trending styles for tops: vintage, cottagecore, grunge, streetwear, earth tones
+(Analyzed 14 tops listings from data/listings.json)
+```
+
+These tags are passed to `suggest_outfit` as `trend_tags` and appear in the LLM prompt as: *"Currently trending styles for tops: vintage, cottagecore, grunge... Where it fits naturally, reference these trends."* The outfit suggestion visibly references them (e.g. "Casual Cottagecore", "Grunge-Inspired Streetwear").
+
+---
+
+### Retry Logic with Fallback
+
+When `search_listings` returns an empty list, `run_agent()` automatically retries with progressively looser constraints before setting an error:
+
+1. **Remove size filter** — keeps price limit, drops size requirement. Tells user: `"removed size filter ('XS')"`
+2. **Raise price limit 50%** — also drops size. Tells user: `"raised price limit to $30"`
+3. **Remove all filters** — description only. Tells user: `"removed all price and size filters"`
+
+If any retry succeeds, `session["retry_info"]` is set and displayed in both the listing panel and the style context panel. If all three retries fail, the original no-results error is returned.
+
+**Example from testing:**
+
+Query: `"denim jacket size XS under $20"` — no exact match (denim jacket is size S at $42)
+
+```
+Retry triggered: No exact matches — automatically adjusted search:
+raised price limit to $30. Showing closest alternative.
+Found: High-Waisted Denim Shorts — Cutoff
+```
+
+---
+
 ## Spec Reflection
 
 **One way the spec helped:** 

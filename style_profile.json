@@ -1,0 +1,31 @@
+{
+  "preferred_styles": [
+    "y2k",
+    "vintage",
+    "graphic tee",
+    "cottagecore",
+    "denim",
+    "summer",
+    "classic",
+    "grunge",
+    "graphic",
+    "streetwear",
+    "90s",
+    "athletic",
+    "feminine",
+    "floral",
+    "western",
+    "earth tones"
+  ],
+  "past_categories": [
+    "tops",
+    "bottoms",
+    "outerwear",
+    "shoes"
+  ],
+  "price_range": {
+    "min": 18.0,
+    "max": 45.0
+  },
+  "interaction_count": 12
+}

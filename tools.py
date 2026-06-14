@@ -1,15 +1,14 @@
 """
 tools.py
 
-The three required FitFindr tools. Each tool is a standalone function that
-can be called and tested independently before being wired into the agent loop.
-
-Complete and test each tool before moving to agent.py.
+The three required FitFindr tools plus two stretch-feature tools.
 
 Tools:
-    search_listings(description, size, max_price)  → list[dict]
-    suggest_outfit(new_item, wardrobe)              → str
-    create_fit_card(outfit, new_item)               → str
+    search_listings(description, size, max_price)              → list[dict]
+    suggest_outfit(new_item, wardrobe, trend_tags, style_profile) → str
+    create_fit_card(outfit, new_item)                          → str
+    compare_price(new_item)                                    → dict   [stretch]
+    get_trending_styles(category)                              → dict   [stretch]
 """
 
 import os
@@ -62,16 +61,13 @@ def search_listings(
     """
     listings = load_listings()
 
-    # Filter by price ceiling (inclusive)
     if max_price is not None:
         listings = [l for l in listings if l["price"] <= max_price]
 
-    # Filter by size — case-insensitive substring match so "M" matches "S/M"
     if size is not None:
         size_lower = size.lower()
         listings = [l for l in listings if size_lower in l["size"].lower()]
 
-    # Score each listing by keyword overlap with description
     keywords = set(description.lower().split())
 
     def _score(listing: dict) -> int:
@@ -92,19 +88,27 @@ def search_listings(
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
-def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
+def suggest_outfit(
+    new_item: dict,
+    wardrobe: dict,
+    trend_tags: list | None = None,
+    style_profile: dict | None = None,
+) -> str:
     """
     Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
 
     Args:
-        new_item: A listing dict (the item the user is considering buying).
-        wardrobe: A wardrobe dict with an 'items' key containing a list of
-                  wardrobe item dicts. May be empty — handle this gracefully.
+        new_item:      A listing dict (the item the user is considering buying).
+        wardrobe:      A wardrobe dict with an 'items' key. May be empty.
+        trend_tags:    Optional list of trending style tags for the item's category.
+                       When provided, the LLM is prompted to incorporate them where natural.
+        style_profile: Optional saved style profile dict (preferred_styles, etc.).
+                       Used as wardrobe substitute when wardrobe is empty and profile
+                       has accumulated preferences from past interactions.
 
     Returns:
         A non-empty string with outfit suggestions.
-        If the wardrobe is empty, offers general styling advice for the item
-        and prepends a note so the caller knows the suggestion is generic.
+        Prepends a context note when wardrobe is empty or profile is substituted.
     """
     client = _get_groq_client()
 
@@ -117,14 +121,38 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     )
 
     wardrobe_items = wardrobe.get("items", [])
+    profile_styles = (style_profile or {}).get("preferred_styles", [])
     is_generic = not wardrobe_items
 
-    if is_generic:
+    trend_line = ""
+    if trend_tags:
+        trend_line = (
+            f"\n\nCurrently trending styles for {new_item['category']}: "
+            f"{', '.join(trend_tags)}. Where it fits naturally, reference these trends."
+        )
+
+    if is_generic and profile_styles:
+        prompt = (
+            f"A user is considering buying this thrifted item:\n{item_desc}\n\n"
+            f"Based on their style history, they gravitate toward: "
+            f"{', '.join(profile_styles[:8])}. "
+            "Suggest 1–2 outfit ideas that match their established style. "
+            "Name specific piece types that would suit them and how to style the look."
+            + trend_line
+        )
+        context_note = (
+            "(Based on your saved style profile — no wardrobe provided this session)\n\n"
+        )
+    elif is_generic:
         prompt = (
             f"A user is considering buying this thrifted item:\n{item_desc}\n\n"
             "They haven't shared their wardrobe. Suggest 1–2 general outfit ideas: "
-            "what kinds of pieces pair well with this item, what vibe or aesthetic it suits, "
+            "what kinds of pieces pair well with this item, what vibe it suits, "
             "and one specific styling tip. Keep it casual and specific."
+            + trend_line
+        )
+        context_note = (
+            "(No wardrobe provided — suggestion is based on general styling advice)\n\n"
         )
     else:
         wardrobe_text = "\n".join(
@@ -136,9 +164,11 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
             f"A user is considering buying this thrifted item:\n{item_desc}\n\n"
             f"Their wardrobe includes:\n{wardrobe_text}\n\n"
             "Suggest 1–2 specific outfit combinations using the new item and named pieces "
-            "from their wardrobe. Be specific about which wardrobe pieces to pair and how "
-            "to style the overall look. Keep it casual and practical."
+            "from their wardrobe. Be specific about which pieces to pair and how to style "
+            "the overall look. Keep it casual and practical."
+            + trend_line
         )
+        context_note = ""
 
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -149,10 +179,7 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     suggestion = response.choices[0].message.content.strip()
 
     if is_generic:
-        suggestion = (
-            "(No wardrobe provided — suggestion is based on general styling advice)\n\n"
-            + suggestion
-        )
+        suggestion = context_note + suggestion
 
     return suggestion
 
@@ -171,11 +198,6 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         A 2–4 sentence string usable as an Instagram/TikTok caption.
         If outfit is empty or missing, returns a descriptive error message
         string — does NOT raise an exception.
-
-    The caption:
-    - Feels casual and authentic (like a real OOTD post)
-    - Mentions the item name, price, and platform naturally (once each)
-    - Captures the outfit vibe in specific terms
     """
     if not outfit or not outfit.strip():
         return (
@@ -205,3 +227,135 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     )
 
     return response.choices[0].message.content.strip()
+
+
+# ── Stretch Tool: compare_price ───────────────────────────────────────────────
+
+def compare_price(new_item: dict) -> dict:
+    """
+    Compare new_item's price against comparable listings in the dataset.
+
+    Comparables are defined as listings that share the same category AND
+    have at least one overlapping style_tag with new_item. The average price
+    of comparables is used as the benchmark.
+
+    Args:
+        new_item: A listing dict from search_listings.
+
+    Returns:
+        A dict with:
+            comparable_count (int): number of comparable listings found
+            avg_comparable_price (float | None): average price of comparables
+            price_diff_pct (float | None): % difference vs. average (negative = cheaper)
+            verdict (str): "great deal", "fair price", "slightly high", "overpriced",
+                           or "no comparables"
+            assessment (str): human-readable explanation with specific numbers
+    """
+    listings = load_listings()
+    item_id = new_item["id"]
+    category = new_item["category"]
+    item_tags = set(new_item.get("style_tags", []))
+    item_price = new_item["price"]
+
+    comparables = [
+        l for l in listings
+        if l["id"] != item_id
+        and l["category"] == category
+        and set(l.get("style_tags", [])) & item_tags
+    ]
+
+    if not comparables:
+        return {
+            "comparable_count": 0,
+            "avg_comparable_price": None,
+            "price_diff_pct": None,
+            "verdict": "no comparables",
+            "assessment": (
+                f"No comparable {category} listings found in the dataset to benchmark against."
+            ),
+        }
+
+    avg_price = sum(l["price"] for l in comparables) / len(comparables)
+    diff_pct = ((item_price - avg_price) / avg_price) * 100
+
+    if diff_pct <= -20:
+        verdict = "great deal"
+        assessment = (
+            f"At ${item_price:.2f}, this is {abs(diff_pct):.0f}% below the average "
+            f"${avg_price:.2f} across {len(comparables)} comparable {category} listing(s). Strong buy."
+        )
+    elif diff_pct <= 5:
+        verdict = "fair price"
+        assessment = (
+            f"At ${item_price:.2f}, this is priced close to the average "
+            f"${avg_price:.2f} across {len(comparables)} comparable {category} listing(s). Fair value."
+        )
+    elif diff_pct <= 25:
+        verdict = "slightly high"
+        assessment = (
+            f"At ${item_price:.2f}, this is {diff_pct:.0f}% above the average "
+            f"${avg_price:.2f} across {len(comparables)} comparable {category} listing(s). "
+            "Reasonable, but room to negotiate."
+        )
+    else:
+        verdict = "overpriced"
+        assessment = (
+            f"At ${item_price:.2f}, this is {diff_pct:.0f}% above the average "
+            f"${avg_price:.2f} across {len(comparables)} comparable {category} listing(s). "
+            "Consider looking for alternatives."
+        )
+
+    return {
+        "comparable_count": len(comparables),
+        "avg_comparable_price": round(avg_price, 2),
+        "price_diff_pct": round(diff_pct, 1),
+        "verdict": verdict,
+        "assessment": assessment,
+    }
+
+
+# ── Stretch Tool: get_trending_styles ─────────────────────────────────────────
+
+def get_trending_styles(category: str | None = None) -> dict:
+    """
+    Identify trending style tags by analyzing tag frequency across the dataset.
+    Tags appearing in more listings are treated as more in-demand.
+
+    Data source: data/listings.json — tag frequency within the dataset is used
+    as a supply-side proxy for what styles are currently circulating most.
+
+    Args:
+        category: Limit trend analysis to one category, or None for all categories.
+
+    Returns:
+        A dict with:
+            trending_styles (list[str]): top 5 style tags by listing count
+            hot_category (str): most-listed category across the full dataset
+            data_source (str): description of what was analyzed
+    """
+    all_listings = load_listings()
+    scoped = (
+        [l for l in all_listings if l["category"] == category]
+        if category else all_listings
+    )
+
+    tag_counts: dict[str, int] = {}
+    for listing in scoped:
+        for tag in listing.get("style_tags", []):
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+    sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
+    trending = [tag for tag, _ in sorted_tags[:5]]
+
+    cat_counts: dict[str, int] = {}
+    for listing in all_listings:
+        cat = listing["category"]
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+    hot_category = max(cat_counts, key=cat_counts.get)
+
+    scope_label = f"{category} listings" if category else "all listings"
+    return {
+        "trending_styles": trending,
+        "hot_category": hot_category,
+        "data_source": f"Analyzed {len(scoped)} {scope_label} from data/listings.json",
+    }

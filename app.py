@@ -1,15 +1,12 @@
 """
 app.py
 
-Gradio interface for FitFindr. The layout and wiring are already set up —
-your job is to fill in handle_query() so it calls run_agent() and maps
-the session results to the three output panels.
-
-Run with:
-    python app.py
-
-Then open the localhost URL shown in your terminal (usually http://localhost:7860,
-but check your terminal — the port may differ).
+Gradio interface for FitFindr. Displays five output panels:
+  1. Top listing found       — item details + price comparison verdict
+  2. Outfit idea             — suggest_outfit result
+  3. Your fit card           — create_fit_card caption
+  4. Price analysis          — compare_price full assessment
+  5. Style context           — trending styles + retry info + profile status
 """
 
 import gradio as gr
@@ -20,38 +17,36 @@ from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(
+    user_query: str,
+    wardrobe_choice: str,
+) -> tuple[str, str, str, str, str]:
     """
     Called by Gradio when the user submits a query.
 
-    Args:
-        user_query:     The text the user typed into the search box.
-        wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
-
-    Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
+    Returns five strings mapped to the five output panels:
+        (listing_text, outfit_suggestion, fit_card, price_analysis, style_context)
     """
-    # Step 1: Guard against an empty query
     if not user_query or not user_query.strip():
-        return "Please enter a search query.", "", ""
+        return "Please enter a search query.", "", "", "", ""
 
-    # Step 2: Select the wardrobe based on the radio choice
-    if wardrobe_choice == "Example wardrobe":
-        wardrobe = get_example_wardrobe()
-    else:
-        wardrobe = get_empty_wardrobe()
+    wardrobe = (
+        get_example_wardrobe()
+        if wardrobe_choice == "Example wardrobe"
+        else get_empty_wardrobe()
+    )
 
-    # Step 3: Run the agent planning loop
     session = run_agent(user_query.strip(), wardrobe)
 
-    # Step 4: If the interaction ended early, surface the error in the first panel
     if session["error"]:
-        return session["error"], "", ""
+        return session["error"], "", "", "", ""
 
-    # Step 5: Format the selected listing into a readable string for the first panel
+    # Panel 1: listing details + inline price verdict
     item = session["selected_item"]
+    verdict = ""
+    if session["price_comparison"]:
+        verdict = f"\n\nPrice verdict: {session['price_comparison']['verdict'].upper()}"
+    retry_note = f"\n\n⚠ {session['retry_info']}" if session["retry_info"] else ""
     listing_text = (
         f"Title:     {item['title']}\n"
         f"Price:     ${item['price']:.2f}\n"
@@ -62,9 +57,51 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"Brand:     {item.get('brand') or 'unknown'}\n"
         f"Tags:      {', '.join(item.get('style_tags', []))}\n\n"
         f"{item['description']}"
+        + verdict
+        + retry_note
     )
 
-    return listing_text, session["outfit_suggestion"], session["fit_card"]
+    # Panel 4: full price comparison breakdown
+    pc = session["price_comparison"]
+    if pc and pc["comparable_count"] > 0:
+        price_analysis = (
+            f"Verdict: {pc['verdict'].upper()}\n\n"
+            f"{pc['assessment']}\n\n"
+            f"Comparables found: {pc['comparable_count']} listing(s)\n"
+            f"Average comparable price: ${pc['avg_comparable_price']:.2f}\n"
+            f"This item vs. average: {pc['price_diff_pct']:+.1f}%"
+        )
+    elif pc:
+        price_analysis = pc["assessment"]
+    else:
+        price_analysis = "Price analysis unavailable."
+
+    # Panel 5: style context — trends + profile status
+    context_parts = []
+    if session["trend_info"]:
+        ti = session["trend_info"]
+        context_parts.append(
+            f"Trending styles for {item['category']}:\n"
+            + ", ".join(ti["trending_styles"])
+            + f"\n\nHot category right now: {ti['hot_category']}"
+            + f"\n({ti['data_source']})"
+        )
+    if session["profile_used"]:
+        context_parts.append(
+            "Style profile active: outfit suggestion was shaped by your saved "
+            "style preferences from past interactions."
+        )
+    if session["retry_info"]:
+        context_parts.append(session["retry_info"])
+    style_context = "\n\n---\n\n".join(context_parts) if context_parts else "No additional context."
+
+    return (
+        listing_text,
+        session["outfit_suggestion"],
+        session["fit_card"],
+        price_analysis,
+        style_context,
+    )
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -74,8 +111,10 @@ EXAMPLE_QUERIES = [
     "90s track jacket in size M",
     "flowy midi skirt under $40",
     "black combat boots size 8",
-    "designer ballgown size XXS under $5",   # deliberate no-results test
+    "denim jacket size XS under $20",    # triggers retry logic
+    "designer ballgown size XXS under $5", # deliberate no-results test
 ]
+
 
 def build_interface():
     with gr.Blocks(title="FitFindr") as demo:
@@ -104,17 +143,29 @@ Describe what you're looking for — include size and price if you want to filte
         with gr.Row():
             listing_output = gr.Textbox(
                 label="🛍️ Top listing found",
-                lines=8,
+                lines=10,
                 interactive=False,
             )
             outfit_output = gr.Textbox(
                 label="👗 Outfit idea",
-                lines=8,
+                lines=10,
                 interactive=False,
             )
             fitcard_output = gr.Textbox(
                 label="✨ Your fit card",
-                lines=8,
+                lines=10,
+                interactive=False,
+            )
+
+        with gr.Row():
+            price_output = gr.Textbox(
+                label="💰 Price analysis",
+                lines=6,
+                interactive=False,
+            )
+            context_output = gr.Textbox(
+                label="🔥 Style context",
+                lines=6,
                 interactive=False,
             )
 
@@ -124,16 +175,16 @@ Describe what you're looking for — include size and price if you want to filte
             label="Try these queries",
         )
 
-        submit_btn.click(
-            fn=handle_query,
-            inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
-        )
-        query_input.submit(
-            fn=handle_query,
-            inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
-        )
+        outputs = [
+            listing_output,
+            outfit_output,
+            fitcard_output,
+            price_output,
+            context_output,
+        ]
+
+        submit_btn.click(fn=handle_query, inputs=[query_input, wardrobe_choice], outputs=outputs)
+        query_input.submit(fn=handle_query, inputs=[query_input, wardrobe_choice], outputs=outputs)
 
     return demo
 
