@@ -67,7 +67,7 @@ Uses an LLM to suggest 1–2 complete outfit combinations pairing the new thrift
 | `wardrobe` | `dict` | A wardrobe dict with an `items` key containing a list of wardrobe item dicts conforming to `wardrobe_schema.json`. May be empty. |
 
 **Output:** 
-`str` — a non-empty string with outfit suggestions. When the wardrobe is empty, the string is prepended with `"(No wardrobe provided — suggestion is based on general styling advice)"` so the caller can detect and communicate the fallback to the user. Never returns an empty string.
+`str` — a non-empty string with outfit suggestions. When the wardrobe is empty, the string is prepended with `"(No wardrobe provided — suggestion is based on general styling advice)"` so the caller can detect and communicate the fallback to the user. If the LLM returns empty/malformed output or raises due to an external-service issue, the tool returns a deterministic fallback suggestion instead of an empty string.
 
 ---
 
@@ -84,7 +84,7 @@ Uses an LLM to generate a 2–4 sentence Instagram/TikTok-style caption for the 
 | `new_item` | `dict` | The listing dict for the thrifted item (provides title, price, platform) |
 
 **Output:** 
-`str` — a 2–4 sentence caption. If `outfit` is empty or whitespace-only, returns a descriptive error string instead of raising — e.g. `"Error: no outfit suggestion available for 'Item Title' — cannot generate a fit card."`
+`str` — a 2–4 sentence caption. If `outfit` is empty or whitespace-only, returns a descriptive error string instead of raising — e.g. `"Error: no outfit suggestion available for 'Item Title' — cannot generate a fit card."` If the LLM caption is empty, too short, or missing required listing context, the tool returns a deterministic fallback caption that includes the item title, price, and platform.
 
 ---
 
@@ -276,8 +276,8 @@ Found: High-Waisted Denim Shorts — Cutoff
 **One way the spec helped:** 
 The error handling table in `planning.md` included exact quoted agent messages for each failure mode (e.g. `"No listings found for '[description]' under $[max_price]. Try a broader term..."`). Having the precise wording specced out meant the error messages in `run_agent()` and `handle_query()` could be written directly from the table without guessing what to say or what information to include. This also made verifying the no-results branch straightforward — the actual output could be compared word-for-word against the spec.
 
-**One way implementation diverged from the spec:** 
-`planning.md` specified that `suggest_outfit` returns a dict with keys `new_item`, `wardrobe`, and `style_notes`, and that `create_fit_card` accepts `outfit (dict)` as its only parameter. The actual scaffold in `tools.py` and `agent.py` defines both functions with string types — `suggest_outfit` returns `str` and `create_fit_card` takes `(outfit: str, new_item: dict)`. The implementation followed the scaffold rather than the planning.md dict design because the scaffold was the authoritative interface that `agent.py`'s session dict and `handle_query()` were already wired to consume. The string interface is also simpler: `outfit_suggestion` is displayed directly in the Gradio panel without any unpacking.
+**One way implementation diverged from the original spec, and how it was resolved:**
+The original `planning.md` specified that `suggest_outfit` would return a dict with keys `new_item`, `wardrobe`, and `style_notes`, and that `create_fit_card` would accept `outfit (dict)` as its only parameter. The actual scaffold in `tools.py` and `agent.py` defines both functions with string types — `suggest_outfit` returns `str` and `create_fit_card` takes `(outfit: str, new_item: dict)`. The implementation followed the scaffold because `agent.py`'s session dict and `handle_query()` were already wired around string display panels. After implementation, `planning.md` was updated as a living spec so future readers no longer see the superseded dict-based design as the active contract.
 
 ---
 
@@ -285,13 +285,13 @@ The error handling table in `planning.md` included exact quoted agent messages f
 
 ### Instance 1 — Implementing `search_listings`
 
-**What Claude was directed to do:** 
+**What Claude was directed to do:**
 Implement `search_listings()` in `tools.py` using `load_listings()` from the data loader. Claude was given: the Tool 1 block from `planning.md` (the three input parameters with names and types, the full list of return value fields, and the failure mode), the `load_listings()` function signature from `utils/data_loader.py`, and the instruction to filter by price and size, score by keyword overlap with description, drop zero-score listings, and sort highest-score first.
 
-**What was produced:** 
+**What was produced:**
 A complete `search_listings` implementation with inclusive price filtering (`<=`), case-insensitive size substring matching, keyword scoring across title, description, category, and style_tags, zero-score removal, and descending sort.
 
-**What was revised before using it:** 
+**What was revised before using it:**
 The initial draft used regex word-boundary matching (`\bkeyword\b`) for keyword scoring, which missed multi-word style tags like `"graphic tee"` because the tag is stored as a single string. This was replaced with a `kw in searchable` substring check on the concatenated text of all searchable fields, which correctly scores multi-word keywords. The fix was verified by running `test_search_sorted_by_relevance`, which confirmed that `"Graphic Tee — 2003 Tour Bootleg Style"` ranked first for the query `"vintage graphic tee"`.
 
 ---
@@ -301,8 +301,21 @@ The initial draft used regex word-boundary matching (`\bkeyword\b`) for keyword 
 **What Claude was directed to do:** 
 Implement `run_agent()` in `agent.py` following the six numbered TODO steps already in the file. Claude was given: the Planning Loop section, State Management section, and ASCII architecture diagram from `planning.md`, along with the pre-filled `_new_session()` dict showing the exact keys to write to at each step. The instruction was to parse the query with regex, guard on empty `search_listings` results, iterate through listings with a `current_index`, and stop on first successful fit card.
 
-**What was produced:** 
+**What was produced:**
 A complete `run_agent()` with a `_parse_query()` regex helper, an early-return guard on empty search results, and a `for` loop over listings that catches exceptions from `suggest_outfit` and `create_fit_card` and increments to the next listing on failure.
 
-**What was revised before using it:** 
+**What was revised before using it:**
 The generated loop only caught exceptions (`try/except Exception: continue`) but did not handle the case where `create_fit_card` succeeds without raising yet returns an error string (its documented graceful failure mode for an empty outfit). A second guard was added after the call: if the return value starts with `"error:"`, the loop also continues to the next listing. This was verified when the VPN was active — every LLM call returned a 403, all 20 listings were iterated, and `session["error"]` was set with a plain-text summary instead of `fit_card` being silently left as `None`.
+
+---
+
+### Instance 3 — Defensive LLM-output testing
+
+**What Claude was directed to do:**
+Review the LLM-dependent tool tests for over-reliance on perfect mock responses, then add cases that simulate empty model output, terse prompt drift, and timeout/rate-limit style exceptions.
+
+**What was produced:**
+`suggest_outfit` and `create_fit_card` now validate model text before returning it. If the model response is empty, too short, malformed, or unavailable, the tools return deterministic fallback text rather than surfacing blank output.
+
+**What was revised before using it:**
+The fallback behavior was kept inside `tools.py` so the public tool contracts stay simple: both LLM tools still return strings, and the planning loop only needs to treat true empty-outfit input as a retryable fit-card error. The new tests in `tests/test_tools.py` verify the fallback paths directly.

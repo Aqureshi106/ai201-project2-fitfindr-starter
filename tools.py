@@ -33,6 +33,90 @@ def _get_groq_client():
     return Groq(api_key=api_key)
 
 
+def _extract_llm_text(response) -> str:
+    """Safely pull text from a Groq chat completion response."""
+    try:
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        return ""
+    if not isinstance(content, str):
+        return ""
+    return content.strip()
+
+
+def _has_enough_words(text: str, minimum: int) -> bool:
+    """Treat ultra-short LLM replies as unusable model drift."""
+    return len(text.split()) >= minimum
+
+
+def _fallback_outfit_suggestion(
+    new_item: dict,
+    wardrobe: dict,
+    context_note: str = "",
+    trend_tags: list | None = None,
+    style_profile: dict | None = None,
+) -> str:
+    """Build a useful outfit suggestion when the LLM response is unavailable."""
+    title = new_item.get("title", "this thrifted piece")
+    category = new_item.get("category", "piece")
+    color_text = ", ".join(new_item.get("colors", [])) or "the item's main color"
+    tag_text = ", ".join(new_item.get("style_tags", [])[:3]) or category
+    trend_text = ""
+    if trend_tags:
+        trend_text = f" The {trend_tags[0]} trend is an easy reference point here."
+
+    wardrobe_items = wardrobe.get("items", []) if isinstance(wardrobe, dict) else []
+    if wardrobe_items:
+        piece_names = [
+            item.get("name", item.get("category", "wardrobe piece"))
+            for item in wardrobe_items[:3]
+        ]
+        pieces = ", ".join(piece_names)
+        suggestion = (
+            f"Pair {title} with {pieces}. Keep the look grounded in {color_text}, "
+            f"then echo the {tag_text} vibe with one simple accessory or shoe choice."
+            f"{trend_text}"
+        )
+    else:
+        profile_styles = (style_profile or {}).get("preferred_styles", [])
+        style_anchor = ", ".join(profile_styles[:3]) if profile_styles else tag_text
+        suggestion = (
+            f"Build the outfit around {title} as the main {category} piece. "
+            f"Use relaxed denim, clean sneakers, or a simple layer that supports "
+            f"the {style_anchor} feel without competing with the item."
+            f"{trend_text}"
+        )
+
+    return context_note + suggestion
+
+
+def _fallback_fit_card(outfit: str, new_item: dict) -> str:
+    """Build a caption when the LLM caption is empty or malformed."""
+    title = new_item.get("title", "this thrifted find")
+    price = new_item.get("price")
+    price_text = f"${price:.2f}" if isinstance(price, (int, float)) else "a thrifted price"
+    platform = new_item.get("platform", "a secondhand platform")
+    outfit_summary = " ".join(outfit.split())[:160].rstrip(".")
+    return (
+        f"{title} for {price_text} on {platform} is the anchor piece for this look. "
+        f"{outfit_summary}."
+    )
+
+
+def _fit_card_text_is_usable(text: str, new_item: dict) -> bool:
+    """Check that a caption has enough detail and names the required listing context."""
+    if not _has_enough_words(text, 8):
+        return False
+    price = new_item.get("price")
+    price_text = f"${price:.2f}" if isinstance(price, (int, float)) else ""
+    platform = str(new_item.get("platform", "")).lower()
+    if price_text and price_text not in text:
+        return False
+    if platform and platform not in text.lower():
+        return False
+    return True
+
+
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
 
 def search_listings(
@@ -110,8 +194,6 @@ def suggest_outfit(
         A non-empty string with outfit suggestions.
         Prepends a context note when wardrobe is empty or profile is substituted.
     """
-    client = _get_groq_client()
-
     item_desc = (
         f"Item: {new_item['title']}\n"
         f"Category: {new_item['category']}\n"
@@ -170,13 +252,25 @@ def suggest_outfit(
         )
         context_note = ""
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-    )
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        suggestion = _extract_llm_text(response)
+    except Exception:
+        suggestion = ""
 
-    suggestion = response.choices[0].message.content.strip()
+    if not _has_enough_words(suggestion, 5):
+        return _fallback_outfit_suggestion(
+            new_item,
+            wardrobe,
+            context_note=context_note,
+            trend_tags=trend_tags,
+            style_profile=style_profile,
+        )
 
     if is_generic:
         suggestion = context_note + suggestion
@@ -205,8 +299,6 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
             f"'{new_item.get('title', 'this item')}' — cannot generate a fit card."
         )
 
-    client = _get_groq_client()
-
     prompt = (
         f"Write a 2–4 sentence Instagram caption for this thrifted outfit.\n\n"
         f"Thrifted item: {new_item['title']} — ${new_item['price']:.2f} "
@@ -220,13 +312,21 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         "Do not use hashtags or emojis."
     )
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.9,
-    )
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,
+        )
+        caption = _extract_llm_text(response)
+    except Exception:
+        caption = ""
 
-    return response.choices[0].message.content.strip()
+    if not _fit_card_text_is_usable(caption, new_item):
+        return _fallback_fit_card(outfit, new_item)
+
+    return caption
 
 
 # ── Stretch Tool: compare_price ───────────────────────────────────────────────

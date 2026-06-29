@@ -67,6 +67,13 @@ def _mock_groq(response_text: str):
     return mock_client
 
 
+def _mock_groq_error(exc: Exception):
+    """Return a mock Groq client whose LLM call raises exc."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = exc
+    return mock_client
+
+
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
 
 def test_search_returns_results():
@@ -158,6 +165,33 @@ def test_suggest_outfit_uses_wardrobe_when_provided():
     assert not result.startswith("(No wardrobe provided")
 
 
+def test_suggest_outfit_empty_llm_response_returns_fallback():
+    """Malformed LLM output: empty content should still produce useful styling text."""
+    with patch("tools._get_groq_client", return_value=_mock_groq("   ")):
+        result = suggest_outfit(SAMPLE_ITEM, SAMPLE_WARDROBE)
+    assert isinstance(result, str)
+    assert len(result.strip()) > 0
+    assert SAMPLE_ITEM["title"] in result
+    assert "Baggy straight-leg jeans" in result
+
+
+def test_suggest_outfit_too_short_llm_response_returns_fallback():
+    """Malformed LLM output: terse prompt drift like 'OK' should not be surfaced."""
+    with patch("tools._get_groq_client", return_value=_mock_groq("OK")):
+        result = suggest_outfit(SAMPLE_ITEM, SAMPLE_WARDROBE)
+    assert result != "OK"
+    assert SAMPLE_ITEM["title"] in result
+
+
+def test_suggest_outfit_llm_exception_returns_fallback():
+    """External-service failure: timeouts/rate limits should degrade to fallback advice."""
+    with patch("tools._get_groq_client", return_value=_mock_groq_error(TimeoutError("timed out"))):
+        result = suggest_outfit(SAMPLE_ITEM, SAMPLE_WARDROBE)
+    assert isinstance(result, str)
+    assert len(result.strip()) > 0
+    assert SAMPLE_ITEM["title"] in result
+
+
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
 
 def test_create_fit_card_returns_string():
@@ -196,3 +230,35 @@ def test_create_fit_card_whitespace_outfit_does_not_raise():
         result = create_fit_card("   ", SAMPLE_ITEM)
     except Exception as exc:
         pytest.fail(f"create_fit_card raised on whitespace outfit: {exc}")
+
+
+def test_create_fit_card_empty_llm_response_returns_fallback_caption():
+    """Malformed LLM output: empty caption content should fall back to a usable card."""
+    outfit = "Tuck the tee into baggy jeans and finish with chunky sneakers."
+    with patch("tools._get_groq_client", return_value=_mock_groq("   ")):
+        result = create_fit_card(outfit, SAMPLE_ITEM)
+    assert isinstance(result, str)
+    assert not result.lower().startswith("error:")
+    assert SAMPLE_ITEM["title"] in result
+    assert "$24.00" in result
+    assert SAMPLE_ITEM["platform"] in result
+
+
+def test_create_fit_card_too_short_llm_response_returns_fallback_caption():
+    """Malformed LLM output: a non-instruction-following response should be replaced."""
+    outfit = "Tuck the tee into baggy jeans and finish with chunky sneakers."
+    with patch("tools._get_groq_client", return_value=_mock_groq("OK")):
+        result = create_fit_card(outfit, SAMPLE_ITEM)
+    assert result != "OK"
+    assert SAMPLE_ITEM["title"] in result
+    assert "$24.00" in result
+
+
+def test_create_fit_card_llm_exception_returns_fallback_caption():
+    """External-service failure: timeout/rate-limit style exceptions return a fallback card."""
+    outfit = "Tuck the tee into baggy jeans and finish with chunky sneakers."
+    with patch("tools._get_groq_client", return_value=_mock_groq_error(TimeoutError("timed out"))):
+        result = create_fit_card(outfit, SAMPLE_ITEM)
+    assert isinstance(result, str)
+    assert not result.lower().startswith("error:")
+    assert SAMPLE_ITEM["title"] in result
